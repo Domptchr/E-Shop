@@ -35,10 +35,97 @@ URL ของ API ตั้งค่าใน `frontend/.env.local` (`NEXT_PUBLI
 | สรุปคำสั่งซื้อ | `/orders/{id}` |
 | Stock สินค้า | `/stock` |
 
-## ฐานข้อมูล
-ER Diagram และคำอธิบายตาราง ดูได้ที่ [docs/er-diagram.md](docs/er-diagram.md)
+## การทำงานของระบบ
+ภาพทั้งหมดถ่ายจากระบบจริง (ต่อ SQL Server) ตามลำดับการใช้งาน ข้อมูลตั้งต้นคือ เมาส์ไร้สาย (P001) Stock 47 ชิ้น และ เว็บแคม (P007) Stock 5 ชิ้น
+แต่ละขั้นอ้างอิงเทสที่ตรวจ logic เดียวกันไว้ใน [การทดสอบ](#การทดสอบ-unit-tests)
 
-![ER Diagram](docs/er-diagram.png)
+### 1. หน้าเลือกซื้อสินค้า
+แสดงสินค้าทั้งหมด พร้อม badge **ใกล้หมด** (พร้อมขาย ≤ 5) และ **สินค้าหมด** การ์ดที่หมดแล้วไม่มีปุ่มให้กด
+
+![หน้าเลือกซื้อสินค้า](assets/screenshots/01-shop.png)
+
+### 2. เพิ่มสินค้าลงตะกร้า = จอง Stock
+เมื่อปรับจำนวน ปุ่มจะเปลี่ยนเป็นสีเต็ม "เพิ่มลงตะกร้า (2)" เพื่อบอกว่ามีรายการรอกด
+
+![ปุ่มเมื่อปรับจำนวน](assets/screenshots/02-dirty-button.png)
+
+กดแล้วสินค้าถูก **จอง** (ReservedQty +2) พร้อมขายลดจาก 47 เหลือ 45 การ์ดขึ้น badge "ในตะกร้า 2" ตัวเลขบนไอคอนตะกร้าอัปเดต และมี toast ยืนยัน
+→ เทส `AddItem_ReservesStock_AndComputesTotal`
+
+![เพิ่มสินค้าลงตะกร้า](assets/screenshots/03-add-to-cart.png)
+
+### 3. Validation: Stock ไม่พอเพิ่มไม่ได้
+| ใส่จำนวนเกินที่เหลือ | จองครบทั้งหมดแล้ว | ตะกร้าของคนอื่นเห็นว่าหมด |
+|---|---|---|
+| ![เกิน stock](assets/screenshots/04-exceed-stock.png) | ![ครบจำนวนแล้ว](assets/screenshots/05-max-reached.png) | ![ตะกร้าอื่น](assets/screenshots/06-other-cart-sold-out.png) |
+| ขอ 10 แต่เหลือ 5 → แจ้งเตือนและกดไม่ได้ | ใส่ครบ 5 ชิ้น → ปุ่ม "ครบจำนวนแล้ว" | เปิดอีก browser (อีกตะกร้า) → ขึ้นสินค้าหมด เพราะถูกจองไปแล้ว |
+| `AddItem_MoreThanAvailable_ThrowsAndKeepsStock` | `UpdateItem_AboveAvailable_Throws` | `AddItem_ReservedByAnotherCart_IsNotAvailable` |
+
+Backend ตรวจซ้ำอีกชั้น ถ้าเรียก API เกินจำนวนจะตอบ `409` พร้อมข้อความ "สินค้า X คงเหลือไม่เพียงพอ (เหลือ n ชิ้น)"
+
+### 4. หน้า Stock: เห็นยอดจองทันที
+**คงเหลือ** (ของจริงในคลัง) ยังไม่ลด แต่ **ถูกจอง** เพิ่มขึ้น และ **พร้อมขาย** = คงเหลือ − ถูกจอง (P001: 47 − 2 = 45, P007: 5 − 5 = 0)
+
+![Stock ระหว่างมีของในตะกร้า](assets/screenshots/07-stock-reserved.png)
+
+### 5. ตะกร้าสินค้า: เพิ่ม / ลด / ลบ / ล้างตะกร้า
+ปรับจำนวนด้วยปุ่ม + / − ลบทีละรายการ หรือล้างทั้งหมด ทุกการกระทำปรับยอดจองให้ถูกต้อง ถ้าจองครบแล้วปุ่ม + จะกดไม่ได้และขึ้น "ครบจำนวนแล้ว (สูงสุด 5 ชิ้น)"
+→ เทส `UpdateItem_IncreaseAndDecrease_AdjustsReservation`, `RemoveItem_ReleasesReservation`, `Clear_ReleasesAllReservations`
+
+![ตะกร้าสินค้า](assets/screenshots/08-cart.png)
+
+ล้างตะกร้าต้องยืนยันก่อน และจะคืนยอดจองกลับเข้า Stock
+
+![ยืนยันล้างตะกร้า](assets/screenshots/09-clear-cart-modal.png)
+
+### 6. Checkout: แสดงยอดที่ต้องชำระ แล้วตัด Stock
+ก่อนยืนยันจะแสดงรายการและ **ยอดที่ต้องชำระ** (590 × 2 + 1,590 × 5 = ฿9,130)
+
+![ยืนยันการชำระเงิน](assets/screenshots/10-checkout-modal.png)
+
+ยืนยันแล้วบันทึก Order และแสดงหน้าสรุป
+→ เทส `Checkout_CutsStock_ReleasesReservation_AndEmptiesCart`
+
+![สรุปคำสั่งซื้อ](assets/screenshots/11-order-summary.png)
+
+### 7. Stock หลัง Checkout
+Stock จริงถูกตัด (P001: 47 → 45, P007: 5 → 0) และยอดจองกลับเป็น 0 เพราะของออกจากตะกร้าแล้ว
+
+![Stock หลัง Checkout](assets/screenshots/12-stock-after-checkout.png)
+
+### 8. ค้นหาและกรองสินค้า
+ค้นหาได้ทั้งชื่อและรหัสสินค้า (ไม่สนตัวพิมพ์เล็กใหญ่) ข้อความที่ตรงกันจะถูก highlight และกรองตามสถานะได้ (ทั้งหมด / พร้อมขาย / ใกล้หมด / สินค้าหมด) ใช้ได้ทั้งหน้าเลือกซื้อและหน้า Stock
+
+![ค้นหา](assets/screenshots/13-search.png)
+
+### 9. Light / Dark mode
+สลับ theme ได้จากปุ่มมุมขวาบน ระบบจำค่าที่เลือกไว้
+
+![Dark mode](assets/screenshots/14-dark-mode.png)
+
+## ฐานข้อมูล (ER Diagram)
+![ER Diagram](assets/er-diagram.png)
+
+| ตาราง | หน้าที่ |
+|---|---|
+| **Products** | ข้อมูลสินค้าและ Stock (สินค้า mock 12 รายการใส่ผ่าน migration) |
+| **Carts** | ตะกร้าสินค้า ระบุด้วย GUID ที่ browser เก็บไว้ใน localStorage |
+| **CartItems** | สินค้าในตะกร้า แต่ละรายการ **จอง** Stock ไว้ |
+| **Orders** | คำสั่งซื้อที่ Checkout แล้ว |
+| **OrderItems** | รายการสินค้าในคำสั่งซื้อ เก็บรหัส ชื่อ และราคา ณ ตอนซื้อ (snapshot) |
+
+| ความสัมพันธ์ | Cardinality | เมื่อลบแม่ |
+|---|---|---|
+| Carts → CartItems | 1 : 0..N | Cascade |
+| Products → CartItems | 1 : 0..N | Restrict |
+| Orders → OrderItems | 1 : 1..N | Cascade |
+| Products → OrderItems | 1 : 0..N | Restrict |
+
+Constraints:
+- `Products`: `UNIQUE (ProductCode)`, `CHECK (StockQty >= 0)`, `CHECK (ReservedQty >= 0 AND ReservedQty <= StockQty)`
+- `CartItems`: `UNIQUE (CartId, ProductId)`, `CHECK (Quantity > 0)`
+- `Orders`: `UNIQUE (OrderNo)`
+- จำนวนพร้อมขาย (Available) = `StockQty − ReservedQty` คำนวณใน code ไม่ได้เก็บเป็นคอลัมน์
 
 ## กฎของ Stock (จอง + ตัดจริง)
 - `StockQty` = จำนวนจริงในคลัง, `ReservedQty` = ถูกจองอยู่ในตะกร้า, `Available` = Stock − Reserved
