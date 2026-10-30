@@ -1,0 +1,14 @@
+bin/
+obj/
+.vs/
+*.user
+node_modules/
+.next/
+.env*.local
+*.tsbuildinfo
+next-env.d.ts
+coverage/
+.vercel
+*.pem
+npm-debug.log*
+docs/
